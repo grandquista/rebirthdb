@@ -54,7 +54,7 @@ cluster_version_t magic_to_version(block_magic_t magic) {
     case 'h': return cluster_version_t::v2_0;
     case 'i': return cluster_version_t::v2_1;
     case 'j': return cluster_version_t::v2_2;
-    case 'k': return cluster_version_t::v2_3;
+    case 'k': return cluster_version_t::v2_3_is_latest_disk;
     default:
         fail_due_to_user_error("You're trying to use an earlier version of RethinkDB "
             "to open a database created by a later version of RethinkDB.");
@@ -213,7 +213,7 @@ void metadata_file_t::read_txn_t::read_bin(
 
 void metadata_file_t::read_txn_t::read_many_bin(
         const store_key_t &key_prefix,
-        const std::function<void(const std::string &key_suffix, read_stream_t *)> &cb,
+        const std::function<void(std::string &&key_suffix, read_stream_t *)> &cb,
         signal_t *interruptor) {
     buf_lock_t sb_lock(buf_parent_t(&txn), SUPERBLOCK_ID, access_t::read);
     wait_interruptible(sb_lock.read_acq_signal(), interruptor);
@@ -230,12 +230,12 @@ void metadata_file_t::read_txn_t::read_many_bin(
             txn->blob_to_stream(
                 kv.expose_buf(),
                 kv.value(),
-                [&](read_stream_t *s) { (*cb)(suffix, s); });
+                [&](read_stream_t *s) { (*cb)(std::move(suffix), s); });
             return continue_bool_t::CONTINUE;
         }
         read_txn_t *txn;
         store_key_t key_prefix;
-        const std::function<void(const std::string &key_suffix, read_stream_t *)> *cb;
+        const std::function<void(std::string &&key_suffix, read_stream_t *)> *cb;
     } dftcb;
     dftcb.txn = this;
     dftcb.key_prefix = key_prefix;
@@ -302,7 +302,8 @@ metadata_file_t::metadata_file_t(
     filepath_file_opener_t file_opener(get_filename(base_path), io_backender);
     init_serializer(&file_opener, perfmon_parent);
     balancer.init(new dummy_cache_balancer_t(METADATA_CACHE_SIZE));
-    cache.init(new cache_t(serializer.get(), balancer.get(), perfmon_parent));
+    cache.init(new cache_t(serializer.get(), balancer.get(), perfmon_parent,
+                           which_cpu_shard_t{0, 1}));
     cache_conn.init(new cache_conn_t(cache.get()));
 
     /* Migrate data if necessary */
@@ -348,6 +349,7 @@ metadata_file_t::metadata_file_t(
         } break;
     case cluster_version_t::v2_3_is_latest_disk:
         break; // Up-to-date, do nothing
+    case cluster_version_t::v2_3_ext:
     default: unreachable();
     }
 }
@@ -366,7 +368,7 @@ metadata_file_t::metadata_file_t(
         log_serializer_t::static_config_t());
     init_serializer(&file_opener, perfmon_parent);
     balancer.init(new dummy_cache_balancer_t(METADATA_CACHE_SIZE));
-    cache.init(new cache_t(serializer.get(), balancer.get(), perfmon_parent));
+    cache.init(new cache_t(serializer.get(), balancer.get(), perfmon_parent, which_cpu_shard_t{0, 1}));
     cache_conn.init(new cache_conn_t(cache.get()));
 
     {
